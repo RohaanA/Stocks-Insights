@@ -1,0 +1,28 @@
+[server]
+# File upload settings (size in MB)
+maxUploadSize = 200
+maxMessageSize = 200
+
+# CORS and XSRF settings for file uploads
+enableCORS = true
+enableXsrfProtection = false
+
+# Server settings for deployment
+headless = true
+port = 8501
+address = "0.0.0.0"
+
+# Allow file uploads
+fileWatcherType = "auto"
+
+[browser]
+gatherUsageStats = false
+
+[theme]
+base = "dark"
+primaryColor = "#9b59b6"
+backgroundColor = "#0e1117"
+secondaryBackgroundColor = "#1e2130"
+textColor = "#fafafa"
+font = "sans serif"
+
