@@ -9,7 +9,11 @@ import pandas as pd
 import streamlit as st
 
 
-st.set_page_config(page_title="Screener Aggregator", layout="wide")
+st.set_page_config(
+    page_title="Screener Aggregator", 
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
 
 
 # ---------- Normalization helpers ----------
@@ -32,7 +36,10 @@ def detect_header_row(df: pd.DataFrame) -> int:
 def to_bytes_buffer(file_like) -> io.BytesIO:
     """Ensure we can rewind uploads/paths for multiple reads."""
     if isinstance(file_like, (str, Path)):
-        data = Path(file_like).read_bytes()
+        path = Path(file_like)
+        if not path.exists():
+            raise FileNotFoundError(f"File not found: {file_like}")
+        data = path.read_bytes()
     else:
         data = file_like.read()
     return io.BytesIO(data)
@@ -69,17 +76,21 @@ def resolve_ticker_column(df: pd.DataFrame) -> Optional[str]:
 @st.cache_data(show_spinner=False)
 def load_ratio_criteria(file_like) -> pd.DataFrame:
     """Read criteria ranges; expects the table that starts with 'Factor'."""
-    buffer = to_bytes_buffer(file_like)
-    raw = pd.read_excel(buffer, header=None)
-    start_rows = raw[raw.eq("Factor").any(axis=1)].index
-    if len(start_rows) == 0:
+    try:
+        buffer = to_bytes_buffer(file_like)
+        raw = pd.read_excel(buffer, header=None)
+        start_rows = raw[raw.eq("Factor").any(axis=1)].index
+        if len(start_rows) == 0:
+            return pd.DataFrame()
+        start = start_rows[0]
+        block = raw.iloc[start:, 2:7]
+        block.columns = ["factor", "description", "good", "avg", "bad"]
+        block = block.dropna(subset=["description"])
+        block["norm_desc"] = block["description"].apply(normalize_label)
+        return block.reset_index(drop=True)
+    except (FileNotFoundError, Exception) as e:
+        # Return empty DataFrame if file can't be loaded
         return pd.DataFrame()
-    start = start_rows[0]
-    block = raw.iloc[start:, 2:7]
-    block.columns = ["factor", "description", "good", "avg", "bad"]
-    block = block.dropna(subset=["description"])
-    block["norm_desc"] = block["description"].apply(normalize_label)
-    return block.reset_index(drop=True)
 
 
 # ---------- Screener ingestion ----------
@@ -478,87 +489,139 @@ def to_excel_bytes(
 
 
 # ---------- UI ----------
-st.title("Screener Aggregator")
-st.write(
-    "Upload one or more screener files (Excel/CSV), apply the ratio criteria "
-    "ranges, and view a consolidated, ranked table with color-coded scores."
-)
+# Add dark mode CSS support and clean up UI
+st.markdown("""
+<style>
+    /* Hide status messages and spinners on main page */
+    [data-testid="stStatus"],
+    [data-testid="stSpinner"] {
+        display: none !important;
+    }
+    
+    /* Dark mode support - works with Streamlit's theme system */
+    .stApp {
+        background-color: var(--background-color, #ffffff);
+    }
+    
+    /* Ensure proper contrast in dark mode */
+    [data-testid="stDataFrame"] {
+        background-color: transparent;
+    }
+    
+    /* Style improvements */
+    .main .block-container {
+        padding-top: 2rem;
+        padding-bottom: 2rem;
+    }
+    
+    /* Better spacing for main content */
+    h1 {
+        margin-bottom: 1rem;
+    }
+    
+    /* Hide any processing indicators */
+    .stSpinner > div {
+        display: none !important;
+    }
+</style>
+""", unsafe_allow_html=True)
+
+st.title("📊 Screener Aggregator")
 
 with st.sidebar:
-    st.header("Upload Screeners")
+    st.header("⚙️ Configuration")
+    
+    # Criteria file upload
+    criteria_upload = st.file_uploader(
+        "Upload Ratio Criteria File (Optional)",
+        type=["xlsx", "xls"],
+        help="Upload the Ratio_Criteria.xlsx file. If not provided, the app will try to find it in sample_files/."
+    )
+    
     screener_uploads = st.file_uploader(
-        "Screener files (.xlsx or .csv)", type=["xlsx", "xls", "csv"], accept_multiple_files=True
+        "Upload Screener Files", 
+        type=["xlsx", "xls", "csv"], 
+        accept_multiple_files=True,
+        help="Upload one or more screener files (Excel/CSV) to analyze"
     )
 
     st.markdown("---")
     st.caption(
-        "We pick the first row containing 'Ticker' as the header and normalize all "
-        "columns for merging. Ticker values must be present."
+        "💡 **Note:** We automatically detect the header row containing 'Ticker' and normalize all columns for merging."
     )
 
 
-# Load fixed criteria file
-criteria_source = Path("sample_files/Ratio_Criteria.xlsx")
-
+# Load criteria file - try multiple locations
 selected_files = list(screener_uploads) if screener_uploads else []
 
-criteria_df = load_ratio_criteria(criteria_source)
-if criteria_df.empty:
-    st.error("Could not locate criteria table. Please check sample_files/Ratio_Criteria.xlsx exists.")
-    st.stop()
+criteria_df = pd.DataFrame()
+criteria_source = None
 
-st.subheader("Ratio Criteria")
-st.dataframe(criteria_df[["factor", "description", "good", "avg", "bad"]], use_container_width=True)
+# First, try uploaded file
+if criteria_upload:
+    criteria_df = load_ratio_criteria(criteria_upload)
+    criteria_source = criteria_upload
+
+# If no upload or empty, try local paths
+if criteria_df.empty:
+    possible_paths = [
+        Path("sample_files/Ratio_Criteria.xlsx"),
+        Path("Ratio_Criteria.xlsx"),
+        Path("./sample_files/Ratio_Criteria.xlsx"),
+    ]
+    
+    for path in possible_paths:
+        try:
+            if path.exists():
+                criteria_df = load_ratio_criteria(path)
+                if not criteria_df.empty:
+                    criteria_source = path
+                    break
+        except Exception:
+            continue
+
+# If still empty, show error
+if criteria_df.empty:
+    st.error(
+        "❌ **Could not locate criteria table.**\n\n"
+        "Please upload the Ratio_Criteria.xlsx file in the sidebar, or ensure it exists in the sample_files/ directory."
+    )
+    st.stop()
 
 if not selected_files:
-    st.info("Upload one or more screener files (Excel/CSV) in the sidebar to begin analysis.")
+    st.info("👆 Upload one or more screener files (Excel/CSV) in the sidebar to begin analysis.")
     st.stop()
 
 
-# Load screeners
+# Load screeners (processing happens silently)
 loaded_screeners: List[pd.DataFrame] = []
 load_errors: List[str] = []
 
-with st.status("Loading screener files...", expanded=False) as status:
-    progress_bar = st.progress(0)
-    total_files = len(selected_files)
-    for idx, f in enumerate(selected_files):
-        file_name = getattr(f, "name", str(f))
-        status.update(label=f"Loading {file_name}... ({idx + 1}/{total_files})")
-        progress_bar.progress((idx + 1) / total_files)
-        df, err = load_screener(f)
-        if err:
-            load_errors.append(err)
-        elif df is not None:
-            loaded_screeners.append(df)
-    status.update(label="Files loaded!", state="complete")
-    progress_bar.empty()
+for f in selected_files:
+    df, err = load_screener(f)
+    if err:
+        load_errors.append(err)
+    elif df is not None:
+        loaded_screeners.append(df)
 
 if load_errors:
-    st.warning("Some files were skipped:\n- " + "\n- ".join(load_errors))
+    st.warning("⚠️ Some files were skipped:\n- " + "\n- ".join(load_errors))
 
 if not loaded_screeners:
-    st.error("No valid screener files to process.")
+    st.error("❌ No valid screener files to process.")
     st.stop()
 
-
-with st.status("Merging screener data...", expanded=False) as status:
-    combined = merge_screeners(loaded_screeners)
-    status.update(label="Merging complete!", state="complete")
-
-st.subheader("Combined Screener Data")
-st.caption(f"{len(combined)} tickers | {len(combined.columns)} columns after merge")
-st.dataframe(safe_for_display(combined.head(200)), use_container_width=True, height=400)
-
-with st.status("Scoring data...", expanded=False) as status:
-    scored, score_cols = score_dataframe(combined, criteria_df)
-    status.update(label="Scoring complete!", state="complete")
+# Process data silently
+combined = merge_screeners(loaded_screeners)
+scored, score_cols = score_dataframe(combined, criteria_df)
+    
 if scored.empty:
-    st.error("Could not score data. Check that tickers and numeric columns exist.")
+    st.error("❌ Could not score data. Check that tickers and numeric columns exist.")
     st.stop()
 
-st.subheader("Ranked & Scored")
-st.caption("Good/Avg/Bad are color coded per the ratio thresholds.")
+# Main page - Only show final results
+st.header("🎯 Final Results")
+st.caption("Ranked and scored stocks with color-coded ratings (Good/Average/Bad)")
 
 color_map = {
     "Good": "#2e7d32",
@@ -613,30 +676,45 @@ if score_columns_present:
             # Fallback for older pandas versions
             styled = styled_df.style.applymap(highlight_scores, subset=score_columns_present)
         
-        st.dataframe(styled, use_container_width=True, height=520)
+        st.dataframe(styled, use_container_width=True, height=600)
     except Exception as e:
         # If styling fails, show un-styled data with a warning
         st.warning(f"Could not apply color coding: {str(e)}. Showing data without styling.")
-        st.dataframe(safe_for_display(scored), use_container_width=True, height=520)
+        st.dataframe(safe_for_display(scored), use_container_width=True, height=600)
 else:
-    st.dataframe(safe_for_display(scored), use_container_width=True, height=520)
+    st.dataframe(safe_for_display(scored), use_container_width=True, height=600)
 
 # Downloads
+st.markdown("---")
 col1, col2 = st.columns(2)
 with col1:
     st.download_button(
-        "Download combined raw (Excel)",
+        "📥 Download Combined Raw Data (Excel)",
         data=to_excel_bytes(combined),
         file_name="combined_screeners.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        use_container_width=True
     )
 with col2:
     st.download_button(
-        "Download scored results (Excel)",
+        "📥 Download Scored Results (Excel)",
         data=to_excel_bytes(scored, score_columns=score_cols, raw_df=combined, criteria_df=criteria_df),
         file_name="scored_results.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        use_container_width=True
     )
 
-st.success("Done! Adjust inputs in the sidebar and rerun as needed.")
+# Create tabs for additional information
+st.markdown("---")
+tab1, tab2 = st.tabs(["📋 Ratio Criteria", "📊 Combined Data"])
+
+with tab1:
+    st.subheader("Ratio Criteria")
+    st.caption("Scoring thresholds used for evaluation")
+    st.dataframe(criteria_df[["factor", "description", "good", "avg", "bad"]], use_container_width=True)
+
+with tab2:
+    st.subheader("Combined Screener Data")
+    st.caption(f"{len(combined)} tickers | {len(combined.columns)} columns after merge")
+    st.dataframe(safe_for_display(combined.head(200)), use_container_width=True, height=500)
 
